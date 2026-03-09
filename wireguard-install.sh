@@ -2,7 +2,7 @@
 #
 # WireGuard Road Warrior Installer
 # Modernized version with privacy-focused logging control
-# Fixed file permissions for security
+# Fixed: Input reading issue resolved
 #
 
 set -euo pipefail
@@ -17,10 +17,8 @@ if [[ "$(readlink -f /proc/$$/exe)" == */dash ]]; then
     exit 1
 fi
 
+# Set secure umask
 umask 077
-
-# Discard stdin to prevent issues with curl|bash one-liners
-read -t 0.001 -N 999999 discard_stdin 2>/dev/null || true
 
 # Check for root privileges
 if [[ $EUID -ne 0 ]]; then
@@ -70,7 +68,7 @@ detect_os() {
                 echo "Error: ${PRETTY_NAME:-$os} 9 or newer is required." >&2
                 exit 1
             fi
-            os="centos"  # Normalize for package management
+            os="centos"
             ;;
         fedora)
             if (( ${os_version%%.*} < 36 )); then
@@ -97,7 +95,6 @@ detect_os
 
 detect_virtualization() {
     if systemd-detect-virt -cq 2>/dev/null; then
-        # Inside container
         if ! grep -q '^wireguard ' /proc/modules 2>/dev/null; then
             use_boringtun=1
         else
@@ -154,7 +151,6 @@ validate_hostname() {
 
 sanitize_client_name() {
     local name=$1
-    # Allow alphanumeric, underscore, hyphen, limit to 15 chars
     echo "$name" | tr -c '[:alnum:]_-' '_' | cut -c1-15
 }
 
@@ -224,7 +220,6 @@ select_dns() {
             echo "Enter DNS servers (IPv4 addresses, separated by commas or spaces):"
             read -r custom_input
             
-            # Convert commas to spaces and split
             custom_input=$(echo "$custom_input" | tr ',' ' ')
             for ip in $custom_input; do
                 if validate_ip "$ip"; then
@@ -246,7 +241,7 @@ select_dns() {
 }
 
 # ────────────────────────────────────────────────
-#  Logging configuration
+#  Logging configuration (FIXED)
 # ────────────────────────────────────────────────
 
 configure_logging() {
@@ -256,16 +251,25 @@ configure_logging() {
     echo "  1) Keep logs (default WireGuard behavior - SaveConfig=true)"
     echo "  2) Disable logging (maximum privacy - SaveConfig=false)"
     echo
-    read -r -p "Choice [1]: " log_choice
+    
+    # FIX: Read directly from /dev/tty to ensure we get input
+    read -r -p "Choice [1]: " log_choice < /dev/tty
     
     case "${log_choice:-1}" in
-        1|"") LOGGING_ENABLED=1 ;;
-        2)    LOGGING_ENABLED=0 ;;
+        1|"") 
+            LOGGING_ENABLED=1
+            echo "✓ Keeping connection logs (default behavior)"
+            ;;
+        2)    
+            LOGGING_ENABLED=0
+            echo "✓ Logging disabled - maximum privacy mode"
+            ;;
         *)    
             echo "Error: Invalid selection." >&2
             exit 1
             ;;
     esac
+    echo
 }
 
 # ────────────────────────────────────────────────
@@ -281,7 +285,6 @@ generate_client_config() {
     client_public_key=$(wg pubkey <<< "$client_private_key")
     psk=$(wg genpsk)
     
-    # Add peer to server config
     {
         echo
         echo "# BEGIN_PEER $client_name"
@@ -292,11 +295,8 @@ generate_client_config() {
         echo "# END_PEER $client_name"
     } >> /etc/wireguard/wg0.conf
     
-    # Create client config file with secure permissions
     local client_config="$SCRIPT_DIR/${client_name}.conf"
     
-    # Create file with secure permissions from the start
-    # Use umask to ensure no other users can read the file during creation
     (
         umask 077
         cat > "$client_config" <<-EOF
@@ -314,10 +314,7 @@ PersistentKeepalive = 25
 EOF
     )
     
-    # Verify permissions (should be 600)
     chmod 600 "$client_config"
-    
-    # Also set secure permissions on the directory if needed
     chmod 700 "$SCRIPT_DIR" 2>/dev/null || true
     
     echo "$client_config"
@@ -332,25 +329,21 @@ configure_firewall() {
     local port=$2
     
     if systemctl is-active --quiet firewalld.service; then
-        # firewalld configuration
         firewall-cmd --quiet --add-port="$port/udp"
         firewall-cmd --quiet --zone=trusted --add-source=10.7.0.0/24
         firewall-cmd --quiet --permanent --add-port="$port/udp"
         firewall-cmd --quiet --permanent --zone=trusted --add-source=10.7.0.0/24
         
-        # NAT configuration
         firewall-cmd --quiet --direct --add-rule ipv4 nat POSTROUTING 0 \
             -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j SNAT --to "$server_ip"
         firewall-cmd --quiet --permanent --direct --add-rule ipv4 nat POSTROUTING 0 \
             -s 10.7.0.0/24 ! -d 10.7.0.0/24 -j SNAT --to "$server_ip"
             
     elif hash iptables 2>/dev/null; then
-        # iptables configuration with systemd service
         local iptables_path iptables_service
         
         iptables_path=$(command -v iptables)
         
-        # Use iptables-legacy on OpenVZ if needed
         if [[ $(systemd-detect-virt) == "openvz" ]] && 
            readlink -f "$iptables_path" | grep -q "nft" && 
            hash iptables-legacy 2>/dev/null; then
@@ -410,7 +403,6 @@ display_qr_code() {
 verify_permissions() {
     local config_file=$1
     
-    # Check if permissions are correct (600)
     local perms
     perms=$(stat -c "%a" "$config_file" 2>/dev/null || stat -f "%OLp" "$config_file" 2>/dev/null)
     
@@ -419,7 +411,6 @@ verify_permissions() {
         chmod 600 "$config_file"
     fi
     
-    # Verify owner is root
     local owner
     owner=$(stat -c "%U" "$config_file" 2>/dev/null || stat -f "%Su" "$config_file" 2>/dev/null)
     if [[ "$owner" != "root" ]]; then
@@ -442,7 +433,7 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
 	└──────────────────────────────────────────────┘
 	EOF
     
-    # Get logging preference
+    # Get logging preference (FIXED: now reads input correctly)
     configure_logging
     
     # Get server IP address
@@ -456,7 +447,7 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
         for i in "${!available_ips[@]}"; do
             echo "  $((i+1))) ${available_ips[i]}"
         done
-        read -r -p "Select IP address [1]: " ip_choice
+        read -r -p "Select IP address [1]: " ip_choice < /dev/tty
         ip_choice=${ip_choice:-1}
         if [[ ! $ip_choice =~ ^[0-9]+$ ]] || (( ip_choice < 1 || ip_choice > ${#available_ips[@]} )); then
             echo "Error: Invalid selection." >&2
@@ -477,11 +468,11 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
         
         if [[ -n $PUBLIC_IP ]] && validate_ip "$PUBLIC_IP"; then
             echo "Detected public IP: $PUBLIC_IP"
-            read -r -p "Use this public IP? [Y/n]: " use_public
+            read -r -p "Use this public IP? [Y/n]: " use_public < /dev/tty
             if [[ ! "$use_public" =~ ^[nN]$ ]]; then
                 SERVER_ENDPOINT="$PUBLIC_IP"
             else
-                read -r -p "Enter public IP or hostname: " custom_public
+                read -r -p "Enter public IP or hostname: " custom_public < /dev/tty
                 if validate_ip "$custom_public" || validate_hostname "$custom_public"; then
                     SERVER_ENDPOINT="$custom_public"
                 else
@@ -490,7 +481,7 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
                 fi
             fi
         else
-            read -r -p "Enter public IP or hostname: " SERVER_ENDPOINT
+            read -r -p "Enter public IP or hostname: " SERVER_ENDPOINT < /dev/tty
             if ! validate_ip "$SERVER_ENDPOINT" && ! validate_hostname "$SERVER_ENDPOINT"; then
                 echo "Error: Invalid IP or hostname." >&2
                 exit 1
@@ -502,7 +493,7 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
     
     # Get WireGuard port
     echo
-    read -r -p "WireGuard listen port [51820]: " WG_PORT
+    read -r -p "WireGuard listen port [51820]: " WG_PORT < /dev/tty
     WG_PORT=${WG_PORT:-51820}
     if ! validate_port "$WG_PORT"; then
         echo "Error: Invalid port number." >&2
@@ -512,7 +503,7 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
     # Get first client name
     echo
     echo "First client configuration:"
-    read -r -p "Client name [client]: " client_name
+    read -r -p "Client name [client]: " client_name < /dev/tty
     client_name=${client_name:-client}
     client_name=$(sanitize_client_name "$client_name")
     
@@ -535,7 +526,6 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
         fi
     fi
     
-    # Add firewall package if needed
     if ! systemctl is-active --quiet firewalld.service && ! hash iptables 2>/dev/null; then
         if [[ "$os" == "centos" || "$os" == "fedora" ]]; then
             packages+=("firewalld")
@@ -546,7 +536,6 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
     
     install_packages "${packages[@]}"
     
-    # Install BoringTun if needed
     if (( use_boringtun == 1 )); then
         echo "Installing BoringTun (userspace WireGuard)..."
         tmp_dir=$(mktemp -d)
@@ -557,7 +546,6 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
         cd - >/dev/null
         rm -rf "$tmp_dir"
         
-        # Configure wg-quick to use BoringTun
         mkdir -p /etc/systemd/system/wg-quick@wg0.service.d
         cat > /etc/systemd/system/wg-quick@wg0.service.d/boringtun.conf <<-EOF
 [Service]
@@ -566,17 +554,14 @@ Environment=WG_SUDO=1
 EOF
     fi
     
-    # Set secure permissions for wireguard directory
     mkdir -p /etc/wireguard
     chmod 700 /etc/wireguard
     
-    # Generate server keys with secure permissions
     (
         umask 077
         SERVER_PRIVATE_KEY=$(wg genkey)
         SERVER_PUBLIC_KEY=$(wg pubkey <<< "$SERVER_PRIVATE_KEY")
         
-        # Create server configuration
         cat > /etc/wireguard/wg0.conf <<-EOF
 # WireGuard server configuration
 # Generated on $(date)
@@ -586,9 +571,6 @@ EOF
 PrivateKey = $SERVER_PRIVATE_KEY
 Address = 10.7.0.1/24
 ListenPort = $WG_PORT
-
-# Logging control
-# SaveConfig = $LOGGING_ENABLED
 EOF
 
         if (( LOGGING_ENABLED == 0 )); then
@@ -596,27 +578,20 @@ EOF
         fi
     )
     
-    # Verify server config permissions
     chmod 600 /etc/wireguard/wg0.conf
     
-    # Enable IP forwarding
     echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-wireguard-forward.conf
     sysctl -p /etc/sysctl.d/99-wireguard-forward.conf >/dev/null
     
-    # Configure firewall
     configure_firewall "$SERVER_IP" "$WG_PORT"
     
-    # Generate first client
     client_octet=$(get_free_octet)
     client_config=$(generate_client_config "$client_name" "$client_octet")
     
-    # Verify client config permissions
     verify_permissions "$client_config"
     
-    # Start WireGuard
     systemctl enable --now wg-quick@wg0.service
     
-    # Display client information
     echo
     echo "✓ Installation complete!"
     echo "✓ Server endpoint: $SERVER_ENDPOINT:$WG_PORT"
@@ -646,15 +621,14 @@ else
     echo "  5) Uninstall WireGuard"
     echo "  6) Exit"
     echo
-    read -r -p "Select option [1-6]: " menu_choice
+    read -r -p "Select option [1-6]: " menu_choice < /dev/tty
     
     case "$menu_choice" in
         1)
-            # Add new client
             echo
             echo "Add New Client"
             echo "──────────────"
-            read -r -p "Client name: " client_name
+            read -r -p "Client name: " client_name < /dev/tty
             
             if [[ -z "$client_name" ]]; then
                 echo "Error: Client name cannot be empty." >&2
@@ -668,17 +642,13 @@ else
                 exit 1
             fi
             
-            # Get DNS servers for new client
             select_dns
             
-            # Generate client configuration
             client_octet=$(get_free_octet)
             client_config=$(generate_client_config "$client_name" "$client_octet")
             
-            # Verify permissions
             verify_permissions "$client_config"
             
-            # Add to live interface
             wg addconf wg0 <(sed -n "/^# BEGIN_PEER $client_name/,/^# END_PEER $client_name/p" /etc/wireguard/wg0.conf)
             
             echo
@@ -690,7 +660,6 @@ else
             ;;
             
         2)
-            # Remove client
             clients=($(grep '^# BEGIN_PEER' /etc/wireguard/wg0.conf | cut -d ' ' -f 3))
             
             if (( ${#clients[@]} == 0 )); then
@@ -704,7 +673,7 @@ else
                 echo "  $((i+1))) ${clients[i]}"
             done
             echo
-            read -r -p "Client number: " client_num
+            read -r -p "Client number: " client_num < /dev/tty
             
             if [[ ! $client_num =~ ^[0-9]+$ ]] || (( client_num < 1 || client_num > ${#clients[@]} )); then
                 echo "Error: Invalid selection." >&2
@@ -714,23 +683,18 @@ else
             client_to_remove="${clients[$((client_num-1))]}"
             
             echo
-            read -r -p "Remove client '$client_to_remove'? [y/N]: " confirm
+            read -r -p "Remove client '$client_to_remove'? [y/N]: " confirm < /dev/tty
             
             if [[ "$confirm" =~ ^[yY]$ ]]; then
-                # Get peer public key
                 peer_pubkey=$(sed -n "/^# BEGIN_PEER $client_to_remove$/,/^# END_PEER $client_to_remove$/p" \
                     /etc/wireguard/wg0.conf | grep '^PublicKey' | cut -d ' ' -f 3)
                 
-                # Remove from live interface
                 wg set wg0 peer "$peer_pubkey" remove
                 
-                # Remove from configuration file
                 sed -i "/^# BEGIN_PEER $client_to_remove$/,/^# END_PEER $client_to_remove$/d" \
                     /etc/wireguard/wg0.conf
                 
-                # Remove client config file securely (overwrite first)
                 if [[ -f "$SCRIPT_DIR/$client_to_remove.conf" ]]; then
-                    # Overwrite with random data before deletion (basic secure deletion)
                     dd if=/dev/urandom of="$SCRIPT_DIR/$client_to_remove.conf" bs=1k count=1 2>/dev/null || true
                     rm -f "$SCRIPT_DIR/$client_to_remove.conf"
                 fi
@@ -742,7 +706,6 @@ else
             ;;
             
         3)
-            # List all clients
             echo
             echo "Configured Clients"
             echo "──────────────────"
@@ -767,20 +730,16 @@ else
             ;;
             
         4)
-            # Fix permissions
             echo
             echo "Fixing permissions on all client files..."
             
-            # Fix wireguard directory
             chmod 700 /etc/wireguard
             
-            # Fix server config
             if [[ -f /etc/wireguard/wg0.conf ]]; then
                 chmod 600 /etc/wireguard/wg0.conf
                 echo "✓ Fixed: /etc/wireguard/wg0.conf"
             fi
             
-            # Fix all client configs
             for config in "$SCRIPT_DIR"/*.conf; do
                 if [[ -f "$config" ]] && [[ "$config" != "/etc/wireguard/wg0.conf" ]]; then
                     chmod 600 "$config"
@@ -793,20 +752,17 @@ else
             ;;
             
         5)
-            # Uninstall WireGuard
             echo
             echo "Uninstall WireGuard"
             echo "───────────────────"
             echo "This will remove WireGuard and all client configurations."
             echo
-            read -r -p "Are you sure? [y/N]: " confirm
+            read -r -p "Are you sure? [y/N]: " confirm < /dev/tty
             
             if [[ "$confirm" =~ ^[yY]$ ]]; then
-                # Stop and disable services
                 systemctl disable --now wg-quick@wg0.service 2>/dev/null || true
                 systemctl disable --now wg-iptables.service 2>/dev/null || true
                 
-                # Remove firewall rules
                 if systemctl is-active --quiet firewalld.service; then
                     port=$(grep '^ListenPort' /etc/wireguard/wg0.conf 2>/dev/null | cut -d ' ' -f 3)
                     if [[ -n "$port" ]]; then
@@ -817,13 +773,9 @@ else
                     firewall-cmd --quiet --permanent --zone=trusted --remove-source=10.7.0.0/24 2>/dev/null || true
                 fi
                 
-                # Remove systemd drop-in for BoringTun
                 rm -rf /etc/systemd/system/wg-quick@wg0.service.d
-                
-                # Remove sysctl configuration
                 rm -f /etc/sysctl.d/99-wireguard-forward.conf
                 
-                # Securely remove client config files
                 if [[ -d "$SCRIPT_DIR" ]]; then
                     for config in "$SCRIPT_DIR"/*.conf; do
                         if [[ -f "$config" ]]; then
@@ -833,16 +785,10 @@ else
                     done
                 fi
                 
-                # Remove WireGuard files
                 rm -rf /etc/wireguard
-                
-                # Remove BoringTun if present
                 rm -f /usr/local/sbin/boringtun
-                
-                # Remove cron job for BoringTun updates
                 crontab -l 2>/dev/null | grep -v 'boringtun-upgrade' | crontab - 2>/dev/null || true
                 
-                # Remove packages
                 if (( use_boringtun == 0 )); then
                     case "$os" in
                         ubuntu|debian)
