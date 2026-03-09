@@ -2,7 +2,7 @@
 #
 # WireGuard Road Warrior Installer
 # Modernized version with privacy-focused logging control
-# FIXED: Removed 'local' from global scope
+# FIXED: Server key persistence and QR code display
 #
 
 set -euo pipefail
@@ -146,6 +146,8 @@ validate_hostname() {
 
 sanitize_client_name() {
     local name=$1
+    # Trim leading/trailing whitespace and replace invalid chars with underscore
+    name=$(echo "$name" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     echo "$name" | tr -c '[:alnum:]_-' '_' | cut -c1-15
 }
 
@@ -293,6 +295,7 @@ generate_client_config() {
     client_public_key=$(wg pubkey <<< "$client_private_key")
     psk=$(wg genpsk)
     
+    # Add peer to server config
     {
         echo
         echo "# BEGIN_PEER $client_name"
@@ -305,6 +308,7 @@ generate_client_config() {
     
     local client_config="$SCRIPT_DIR/${client_name}.conf"
     
+    # Create client config with secure permissions
     (
         umask 077
         cat > "$client_config" <<-EOF
@@ -391,6 +395,16 @@ EOF
 
 display_qr_code() {
     local config_file=$1
+    
+    if [[ ! -f "$config_file" ]]; then
+        echo "Error: Client configuration file not found: $config_file" >&2
+        return 1
+    fi
+    
+    if [[ ! -s "$config_file" ]]; then
+        echo "Error: Client configuration file is empty: $config_file" >&2
+        return 1
+    fi
     
     if hash qrencode 2>/dev/null; then
         echo
@@ -552,7 +566,6 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
     echo
     echo "Installing required packages..."
     
-    # FIXED: Removed 'local' keyword - not allowed in global scope
     packages=()
     if (( use_boringtun == 0 )); then
         packages+=("wireguard" "wireguard-tools" "qrencode")
@@ -593,15 +606,15 @@ Environment=WG_SUDO=1
 EOF
     fi
     
+    # Generate server keys (outside subshell so variables persist)
     mkdir -p /etc/wireguard
     chmod 700 /etc/wireguard
     
-    (
-        umask 077
-        SERVER_PRIVATE_KEY=$(wg genkey)
-        SERVER_PUBLIC_KEY=$(wg pubkey <<< "$SERVER_PRIVATE_KEY")
-        
-        cat > /etc/wireguard/wg0.conf <<-EOF
+    SERVER_PRIVATE_KEY=$(wg genkey)
+    SERVER_PUBLIC_KEY=$(wg pubkey <<< "$SERVER_PRIVATE_KEY")
+    
+    # Create server configuration
+    cat > /etc/wireguard/wg0.conf <<-EOF
 # WireGuard server configuration
 # Generated on $(date)
 # ENDPOINT $SERVER_ENDPOINT
@@ -612,25 +625,29 @@ Address = 10.7.0.1/24
 ListenPort = $WG_PORT
 EOF
 
-        if (( LOGGING_ENABLED == 0 )); then
-            echo "SaveConfig = false" >> /etc/wireguard/wg0.conf
-        fi
-    )
+    if (( LOGGING_ENABLED == 0 )); then
+        echo "SaveConfig = false" >> /etc/wireguard/wg0.conf
+    fi
     
     chmod 600 /etc/wireguard/wg0.conf
     
+    # Enable IP forwarding
     echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-wireguard-forward.conf
     sysctl -p /etc/sysctl.d/99-wireguard-forward.conf >/dev/null
     
+    # Configure firewall
     configure_firewall "$SERVER_IP" "$WG_PORT"
     
+    # Generate first client
     client_octet=$(get_free_octet)
     client_config=$(generate_client_config "$client_name" "$client_octet")
     
     verify_permissions "$client_config"
     
+    # Start WireGuard
     systemctl enable --now wg-quick@wg0.service
     
+    # Display client information
     echo
     echo "✓ Installation complete!"
     echo "✓ Server endpoint: $SERVER_ENDPOINT:$WG_PORT"
@@ -681,13 +698,16 @@ else
                 exit 1
             fi
             
+            # Get DNS servers for new client
             select_dns
             
+            # Generate client configuration
             client_octet=$(get_free_octet)
             client_config=$(generate_client_config "$client_name" "$client_octet")
             
             verify_permissions "$client_config"
             
+            # Add to live interface
             wg addconf wg0 <(sed -n "/^# BEGIN_PEER $client_name/,/^# END_PEER $client_name/p" /etc/wireguard/wg0.conf)
             
             echo
