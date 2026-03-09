@@ -2,7 +2,7 @@
 #
 # WireGuard Road Warrior Installer
 # Modernized version with privacy-focused logging control
-# FIXED: Server key persistence and QR code display
+# FIXED: Server key persistence for client addition
 #
 
 set -euo pipefail
@@ -177,6 +177,28 @@ install_packages() {
             dnf install -y -q "${packages[@]}"
             ;;
     esac
+}
+
+# ────────────────────────────────────────────────
+#  Server information extraction functions (for management)
+# ────────────────────────────────────────────────
+
+get_server_private_key() {
+    grep '^PrivateKey' /etc/wireguard/wg0.conf | cut -d ' ' -f 3
+}
+
+get_server_public_key() {
+    local priv
+    priv=$(get_server_private_key)
+    wg pubkey <<< "$priv"
+}
+
+get_server_endpoint() {
+    grep '^# ENDPOINT' /etc/wireguard/wg0.conf | cut -d ' ' -f 3
+}
+
+get_server_port() {
+    grep '^ListenPort' /etc/wireguard/wg0.conf | cut -d ' ' -f 3
 }
 
 # ────────────────────────────────────────────────
@@ -606,7 +628,7 @@ Environment=WG_SUDO=1
 EOF
     fi
     
-    # Generate server keys (outside subshell so variables persist)
+    # Generate server keys
     mkdir -p /etc/wireguard
     chmod 700 /etc/wireguard
     
@@ -618,6 +640,7 @@ EOF
 # WireGuard server configuration
 # Generated on $(date)
 # ENDPOINT $SERVER_ENDPOINT
+# SERVER_PUBLIC_KEY = $SERVER_PUBLIC_KEY
 
 [Interface]
 PrivateKey = $SERVER_PRIVATE_KEY
@@ -700,6 +723,24 @@ else
             
             # Get DNS servers for new client
             select_dns
+            
+            # Extract server information from existing config
+            SERVER_PRIVATE_KEY=$(get_server_private_key)
+            if [[ -z "$SERVER_PRIVATE_KEY" ]]; then
+                echo "Error: Could not extract server private key from config." >&2
+                exit 1
+            fi
+            SERVER_PUBLIC_KEY=$(get_server_public_key)
+            SERVER_ENDPOINT=$(get_server_endpoint)
+            if [[ -z "$SERVER_ENDPOINT" ]]; then
+                echo "Error: Could not extract server endpoint from config." >&2
+                exit 1
+            fi
+            WG_PORT=$(get_server_port)
+            if [[ -z "$WG_PORT" ]]; then
+                echo "Error: Could not extract server port from config." >&2
+                exit 1
+            fi
             
             # Generate client configuration
             client_octet=$(get_free_octet)
