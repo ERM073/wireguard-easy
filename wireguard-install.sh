@@ -2,7 +2,7 @@
 #
 # WireGuard Road Warrior Installer
 # Modernized version with privacy-focused logging control
-# Fixed: Input reading issue resolved
+# FIXED: All read commands now read from /dev/tty
 #
 
 set -euo pipefail
@@ -183,7 +183,7 @@ install_packages() {
 }
 
 # ────────────────────────────────────────────────
-#  DNS selection
+#  DNS selection (FIXED: all reads use /dev/tty)
 # ────────────────────────────────────────────────
 
 select_dns() {
@@ -198,7 +198,7 @@ select_dns() {
     echo "  7) AdGuard (94.140.14.14, 94.140.15.15)"
     echo "  8) Custom DNS servers"
     
-    read -r -p "Choice [1]: " dns_choice
+    read -r -p "Choice [1]: " dns_choice < /dev/tty
     
     case "${dns_choice:-1}" in
         1|"")
@@ -208,17 +208,30 @@ select_dns() {
                 resolv="/etc/resolv.conf"
             fi
             DNS_SERVERS=$(grep '^nameserver' "$resolv" | grep -v '127.0.0.53' | awk '{print $2}' | paste -sd, -)
+            echo "✓ Using system DNS: $DNS_SERVERS"
             ;;
-        2) DNS_SERVERS="8.8.8.8,8.8.4.4" ;;
-        3) DNS_SERVERS="1.1.1.1,1.0.0.1" ;;
-        4) DNS_SERVERS="208.67.222.222,208.67.220.220" ;;
-        5) DNS_SERVERS="9.9.9.9,149.112.112.112" ;;
-        6) DNS_SERVERS="95.85.95.85,2.56.220.2" ;;
-        7) DNS_SERVERS="94.140.14.14,94.140.15.15" ;;
+        2) DNS_SERVERS="8.8.8.8,8.8.4.4"
+           echo "✓ Using Google DNS"
+           ;;
+        3) DNS_SERVERS="1.1.1.1,1.0.0.1"
+           echo "✓ Using Cloudflare DNS"
+           ;;
+        4) DNS_SERVERS="208.67.222.222,208.67.220.220"
+           echo "✓ Using OpenDNS"
+           ;;
+        5) DNS_SERVERS="9.9.9.9,149.112.112.112"
+           echo "✓ Using Quad9 DNS"
+           ;;
+        6) DNS_SERVERS="95.85.95.85,2.56.220.2"
+           echo "✓ Using Gcore DNS"
+           ;;
+        7) DNS_SERVERS="94.140.14.14,94.140.15.15"
+           echo "✓ Using AdGuard DNS"
+           ;;
         8)
             local custom_dns=()
             echo "Enter DNS servers (IPv4 addresses, separated by commas or spaces):"
-            read -r custom_input
+            read -r custom_input < /dev/tty
             
             custom_input=$(echo "$custom_input" | tr ',' ' ')
             for ip in $custom_input; do
@@ -232,6 +245,7 @@ select_dns() {
                 exit 1
             fi
             DNS_SERVERS=$(IFS=,; echo "${custom_dns[*]}")
+            echo "✓ Using custom DNS: $DNS_SERVERS"
             ;;
         *)
             echo "Error: Invalid selection." >&2
@@ -252,7 +266,6 @@ configure_logging() {
     echo "  2) Disable logging (maximum privacy - SaveConfig=false)"
     echo
     
-    # FIX: Read directly from /dev/tty to ensure we get input
     read -r -p "Choice [1]: " log_choice < /dev/tty
     
     case "${log_choice:-1}" in
@@ -420,33 +433,27 @@ verify_permissions() {
 }
 
 # ────────────────────────────────────────────────
-#  Main installation
+#  IP address selection (FIXED)
 # ────────────────────────────────────────────────
 
-if [[ ! -f /etc/wireguard/wg0.conf ]]; then
-    # First-time installation
-    clear
-    cat <<-EOF
-	┌──────────────────────────────────────────────┐
-	│     WireGuard Road Warrior Installer         │
-	│     Modern version with privacy controls     │
-	└──────────────────────────────────────────────┘
-	EOF
+select_server_ip() {
+    local available_ips=($(ip -4 addr | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^127\.'))
     
-    # Get logging preference (FIXED: now reads input correctly)
-    configure_logging
-    
-    # Get server IP address
-    available_ips=($(ip -4 addr | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^127\.'))
+    if (( ${#available_ips[@]} == 0 )); then
+        echo "Error: No valid IPv4 addresses found." >&2
+        exit 1
+    fi
     
     if (( ${#available_ips[@]} == 1 )); then
         SERVER_IP="${available_ips[0]}"
+        echo "✓ Using IP: $SERVER_IP"
     else
         echo
         echo "Available IP addresses:"
         for i in "${!available_ips[@]}"; do
             echo "  $((i+1))) ${available_ips[i]}"
         done
+        echo
         read -r -p "Select IP address [1]: " ip_choice < /dev/tty
         ip_choice=${ip_choice:-1}
         if [[ ! $ip_choice =~ ^[0-9]+$ ]] || (( ip_choice < 1 || ip_choice > ${#available_ips[@]} )); then
@@ -454,9 +461,15 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
             exit 1
         fi
         SERVER_IP="${available_ips[$((ip_choice-1))]}"
+        echo "✓ Selected IP: $SERVER_IP"
     fi
-    
-    # Check if behind NAT
+}
+
+# ────────────────────────────────────────────────
+#  NAT/public IP handling (FIXED)
+# ────────────────────────────────────────────────
+
+handle_nat() {
     if [[ $SERVER_IP =~ ^(10\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168) ]]; then
         echo
         echo "Server appears to be behind NAT."
@@ -471,10 +484,12 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
             read -r -p "Use this public IP? [Y/n]: " use_public < /dev/tty
             if [[ ! "$use_public" =~ ^[nN]$ ]]; then
                 SERVER_ENDPOINT="$PUBLIC_IP"
+                echo "✓ Using public IP: $SERVER_ENDPOINT"
             else
                 read -r -p "Enter public IP or hostname: " custom_public < /dev/tty
                 if validate_ip "$custom_public" || validate_hostname "$custom_public"; then
                     SERVER_ENDPOINT="$custom_public"
+                    echo "✓ Using custom endpoint: $SERVER_ENDPOINT"
                 else
                     echo "Error: Invalid IP or hostname." >&2
                     exit 1
@@ -486,10 +501,36 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
                 echo "Error: Invalid IP or hostname." >&2
                 exit 1
             fi
+            echo "✓ Using custom endpoint: $SERVER_ENDPOINT"
         fi
     else
         SERVER_ENDPOINT="$SERVER_IP"
+        echo "✓ Using direct IP: $SERVER_ENDPOINT"
     fi
+}
+
+# ────────────────────────────────────────────────
+#  Main installation
+# ────────────────────────────────────────────────
+
+if [[ ! -f /etc/wireguard/wg0.conf ]]; then
+    # First-time installation
+    clear
+    cat <<-EOF
+	┌──────────────────────────────────────────────┐
+	│     WireGuard Road Warrior Installer         │
+	│     Modern version with privacy controls     │
+	└──────────────────────────────────────────────┘
+	EOF
+    
+    # Get logging preference
+    configure_logging
+    
+    # Select server IP
+    select_server_ip
+    
+    # Handle NAT if needed
+    handle_nat
     
     # Get WireGuard port
     echo
@@ -499,6 +540,7 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
         echo "Error: Invalid port number." >&2
         exit 1
     fi
+    echo "✓ Using port: $WG_PORT"
     
     # Get first client name
     echo
@@ -506,6 +548,7 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
     read -r -p "Client name [client]: " client_name < /dev/tty
     client_name=${client_name:-client}
     client_name=$(sanitize_client_name "$client_name")
+    echo "✓ Client name: $client_name"
     
     # Get DNS servers
     select_dns
