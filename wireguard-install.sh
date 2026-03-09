@@ -2,7 +2,7 @@
 #
 # WireGuard Road Warrior Installer
 # Modernized version with privacy-focused logging control
-# FIXED: Server key persistence for client addition
+# FEATURE: Display SCP download command after client creation
 #
 
 set -euo pipefail
@@ -177,6 +177,23 @@ install_packages() {
             dnf install -y -q "${packages[@]}"
             ;;
     esac
+}
+
+# ────────────────────────────────────────────────
+#  SSH port detection (for scp hint)
+# ────────────────────────────────────────────────
+
+get_ssh_port() {
+    # Try to detect SSH port from sshd_config
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        local port
+        port=$(grep -E '^Port\s+' /etc/ssh/sshd_config | awk '{print $2}' | head -1)
+        if [[ -n "$port" ]] && validate_port "$port"; then
+            echo "$port"
+            return
+        fi
+    fi
+    echo "22"  # default
 }
 
 # ────────────────────────────────────────────────
@@ -441,6 +458,23 @@ display_qr_code() {
 }
 
 # ────────────────────────────────────────────────
+#  Display SCP download hint
+# ────────────────────────────────────────────────
+
+display_scp_hint() {
+    local config_file=$1
+    local server_endpoint=$2
+    
+    local ssh_port
+    ssh_port=$(get_ssh_port)
+    
+    echo
+    echo "📥 To download this configuration to your local machine, use:"
+    echo "   scp -P $ssh_port root@$server_endpoint:$config_file ./"
+    echo "   (Replace 'root' with your SSH username if different)"
+}
+
+# ────────────────────────────────────────────────
 #  Verify file permissions
 # ────────────────────────────────────────────────
 
@@ -679,6 +713,7 @@ EOF
     echo "✓ Permissions: $(stat -c "%a %n" "$client_config" 2>/dev/null || stat -f "%OLp %N" "$client_config" 2>/dev/null)"
     
     display_qr_code "$client_config"
+    display_scp_hint "$client_config" "$SERVER_ENDPOINT"
     
     echo
     echo "To add more clients, run this script again."
@@ -757,6 +792,7 @@ else
             echo "✓ Permissions: $(stat -c "%a %n" "$client_config" 2>/dev/null || stat -f "%OLp %N" "$client_config" 2>/dev/null)"
             
             display_qr_code "$client_config"
+            display_scp_hint "$client_config" "$SERVER_ENDPOINT"
             ;;
             
         2)
