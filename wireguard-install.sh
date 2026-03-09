@@ -2,7 +2,7 @@
 #
 # WireGuard Road Warrior Installer
 # Modernized version with privacy-focused logging control
-# FIXED: All read commands now read from /dev/tty
+# FIXED: Removed 'local' from global scope
 #
 
 set -euo pipefail
@@ -11,22 +11,18 @@ set -euo pipefail
 #  Initialization and sanity checks
 # ────────────────────────────────────────────────
 
-# Ensure script is run with bash, not sh/dash
 if [[ "$(readlink -f /proc/$$/exe)" == */dash ]]; then
     echo "Error: This script must be executed with bash, not sh." >&2
     exit 1
 fi
 
-# Set secure umask
 umask 077
 
-# Check for root privileges
 if [[ $EUID -ne 0 ]]; then
     echo "Error: This script must be run as root." >&2
     exit 1
 fi
 
-# Verify sbin directories are in PATH
 if ! grep -q sbin <<< "$PATH"; then
     echo "Error: PATH does not include sbin directories. Try using 'su -' instead of 'su'." >&2
     exit 1
@@ -38,7 +34,6 @@ fi
 
 detect_os() {
     if [[ -f /etc/os-release ]]; then
-        # shellcheck source=/dev/null
         . /etc/os-release
         os="${ID:-unknown}"
         os_version="${VERSION_ID:-0}"
@@ -183,7 +178,7 @@ install_packages() {
 }
 
 # ────────────────────────────────────────────────
-#  DNS selection (FIXED: all reads use /dev/tty)
+#  DNS selection
 # ────────────────────────────────────────────────
 
 select_dns() {
@@ -255,7 +250,7 @@ select_dns() {
 }
 
 # ────────────────────────────────────────────────
-#  Logging configuration (FIXED)
+#  Logging configuration
 # ────────────────────────────────────────────────
 
 configure_logging() {
@@ -433,7 +428,7 @@ verify_permissions() {
 }
 
 # ────────────────────────────────────────────────
-#  IP address selection (FIXED)
+#  IP address selection
 # ────────────────────────────────────────────────
 
 select_server_ip() {
@@ -466,7 +461,7 @@ select_server_ip() {
 }
 
 # ────────────────────────────────────────────────
-#  NAT/public IP handling (FIXED)
+#  NAT/public IP handling
 # ────────────────────────────────────────────────
 
 handle_nat() {
@@ -557,7 +552,8 @@ if [[ ! -f /etc/wireguard/wg0.conf ]]; then
     echo
     echo "Installing required packages..."
     
-    local packages=()
+    # FIXED: Removed 'local' keyword - not allowed in global scope
+    packages=()
     if (( use_boringtun == 0 )); then
         packages+=("wireguard" "wireguard-tools" "qrencode")
     else
