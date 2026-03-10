@@ -32,10 +32,11 @@ Secure, fast, and easy-to-use VPN setup for modern Linux distributions.
 ## 🚀 Quick Start
 
 # Download and run the installer
+```bash
 curl -O https://raw.githubusercontent.com/ERM073/wireguard-easy/refs/heads/main/wireguard-install.sh
 chmod +x wireguard-install.sh
 sudo ./wireguard-install.sh
-
+```
 ---
 
 ## ⚙️ Requirements
